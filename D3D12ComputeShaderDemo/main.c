@@ -777,6 +777,12 @@ void ReleaseResources(void)
     if (s_uploadBuffer != NULL)
         s_uploadBuffer->lpVtbl->Release(s_uploadBuffer);
 
+    if (s_constantBuffer != NULL)
+        s_constantBuffer->lpVtbl->Release(s_constantBuffer);
+
+    if (s_constantUploadBuffer != NULL)
+        s_constantUploadBuffer->lpVtbl->Release(s_constantUploadBuffer);
+
     if (s_computeAllocator != NULL)
         s_computeAllocator->lpVtbl->Release(s_computeAllocator);
 
@@ -832,6 +838,11 @@ int main(void)
         {
             s_uploadBuffer->lpVtbl->Release(s_uploadBuffer);
             s_uploadBuffer = NULL;
+        }
+        if (s_constantUploadBuffer != NULL)
+        {
+            s_constantUploadBuffer->lpVtbl->Release(s_constantUploadBuffer);
+            s_constantUploadBuffer = NULL;
         }
 
         DoCompute();
