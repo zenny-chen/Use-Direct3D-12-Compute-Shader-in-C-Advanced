@@ -36,6 +36,12 @@ static ID3D12Resource *s_srcDataBuffer;
 // The intermediate buffer object used to copy the source data to the SRV buffer
 static ID3D12Resource* s_uploadBuffer;
 
+// The second destination buffer object with unordered access view type
+static ID3D12Resource* s_dst2Buffer;
+
+// The intermediate buffer object used to copy specified data to the the second destination data
+static ID3D12Resource* s_dst2UploadBuffer;
+
 // The constant buffer object
 static ID3D12Resource* s_constantBuffer;
 
@@ -53,6 +59,12 @@ static ID3D12CommandQueue *s_computeCommandQueue;
 
 // The command list object
 static ID3D12GraphicsCommandList *s_computeCommandList;
+
+// The first source data buffer
+static int *s_dataBuffer0;
+
+// The second source data buffer
+static int* s_dataBuffer1;
 
 // The function is used to amend ID3D12Resource::GetDesc bridged to COM API
 static inline void GetResourceDesc(ID3D12Resource *resource, D3D12_RESOURCE_DESC *pDesc)
@@ -315,7 +327,7 @@ static void SyncCommandQueue(ID3D12CommandQueue *commandQueue, ID3D12Device *dev
     fence->lpVtbl->Release(fence);
 }
 
-// Create the Shader Resource View buffer object
+// Create the write-only Shader Resource View buffer object
 static ID3D12Resource* CreateSRVBuffer(const void* inputData, size_t dataSize)
 {
     ID3D12Resource *resultBuffer = NULL;
@@ -393,8 +405,8 @@ static ID3D12Resource* CreateSRVBuffer(const void* inputData, size_t dataSize)
     return resultBuffer;
 }
 
-// Create the Unordered Access View buffer object
-static ID3D12Resource* CreateUAV_RWBuffer(const void* inputData, size_t dataSize)
+// Create the read-only Unordered Access View buffer object for the first destination buffer object
+static ID3D12Resource* CreateUAV_RBuffer(const void* inputData, size_t dataSize)
 {
     ID3D12Resource *resultBuffer = NULL;
     HRESULT hr;
@@ -443,6 +455,79 @@ static ID3D12Resource* CreateUAV_RWBuffer(const void* inputData, size_t dataSize
     }
 
     return resultBuffer;
+}
+
+// Create the read-write Unordered Access View buffer object for the second destination buffer object
+static void CreateUAV2_RWBuffer(const void* inputData, size_t dataSize)
+{
+    HRESULT hr;
+
+    do
+    {
+        D3D12_HEAP_PROPERTIES heapProperties = { D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            D3D12_MEMORY_POOL_UNKNOWN, 1, 1 };
+        D3D12_HEAP_PROPERTIES heapUploadProperties = { D3D12_HEAP_TYPE_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+    D3D12_MEMORY_POOL_UNKNOWN, 1, 1 };
+
+        D3D12_RESOURCE_DESC resourceDesc = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, dataSize, 1, 1, 1,
+            DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS };
+        D3D12_RESOURCE_DESC uploadBufferDesc = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, dataSize, 1, 1, 1,
+    DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE };
+
+        // Create the UAV buffer and make it in the unordered access state.
+        hr = s_device->lpVtbl->CreateCommittedResource(s_device, &heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&s_dst2Buffer);
+        if (FAILED(hr))
+        {
+            puts("Failed to create resultBuffer!");
+            return;
+        }
+
+        // Create the upload buffer and make it as the generic read intermediate.
+        hr = s_device->lpVtbl->CreateCommittedResource(s_device, &heapUploadProperties, D3D12_HEAP_FLAG_NONE, &uploadBufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void**)&s_dst2UploadBuffer);
+        if (FAILED(hr))
+            break;
+
+        // Describe the data we want to copy into the SRV buffer.
+        D3D12_SUBRESOURCE_DATA subResourceData = { 0 };
+        subResourceData.pData = inputData;
+        subResourceData.RowPitch = dataSize;
+        subResourceData.SlicePitch = subResourceData.RowPitch;
+        UpdateSubresources(s_device, s_computeCommandList, s_dst2Buffer, s_dst2UploadBuffer, 0, 0, 1, &subResourceData);
+
+        // Insert a barrier to sync the copy operation, 
+        // and transit the SRV buffer to non pixel shader resource state.
+        D3D12_RESOURCE_BARRIER barrier = { D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            .Transition = { s_dst2Buffer, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS } };
+        s_computeCommandList->lpVtbl->ResourceBarrier(s_computeCommandList, 1, &barrier);
+
+        // Setup the UAV descriptor. This will be stored in the second slot of the heap.
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = { 0 };
+        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uavDesc.Buffer.FirstElement = 0;
+        uavDesc.Buffer.NumElements = TEST_DATA_COUNT;
+        uavDesc.Buffer.StructureByteStride = sizeof(int);
+        uavDesc.Buffer.CounterOffsetInBytes = 0;
+        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+        // Get the descriptor handle from the descriptor heap.
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle;
+        GetCPUDescriptorHandleForHeapStart(s_heap, &uavHandle);
+        // It will occupy the third slot.
+        uavHandle.ptr += 2 * s_srvUavDescriptorSize;
+
+        s_device->lpVtbl->CreateUnorderedAccessView(s_device, s_dst2Buffer, NULL, &uavDesc, uavHandle);
+
+    } while (false);
+
+    if (FAILED(hr))
+    {
+        puts("Create UAV Buffer failed!");
+        return;
+    }
 }
 
 // Create and initialize the constant buffer object
@@ -532,8 +617,8 @@ static bool InitAssets(void)
 
     // ---- Create descriptor heaps. ----
     D3D12_DESCRIPTOR_HEAP_DESC srvUavHeapDesc = { 0 };
-    // There are two descriptors for the heap. One for SRV buffer, the other for UAV buffer
-    srvUavHeapDesc.NumDescriptors = 2;
+    // There are two descriptors for the heap. One for SRV buffer, the other two for UAV buffers
+    srvUavHeapDesc.NumDescriptors = 3;
     srvUavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvUavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     hr = s_device->lpVtbl->CreateDescriptorHeap(s_device, &srvUavHeapDesc, &IID_ID3D12DescriptorHeap, (void**)&s_heap);
@@ -560,21 +645,30 @@ static bool InitAssets(void)
 
         // Compute root signature.
         {
-            D3D12_DESCRIPTOR_RANGE1 ranges[2] = {
+            D3D12_DESCRIPTOR_RANGE1 ranges[3] = {
+                // t0
                 {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
-                {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND}
+
+                // u0
+                {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
+
+                // u1
+                {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND}
             };
 
             // There're 3 parameters which will be passed to the compute shader
-            D3D12_ROOT_PARAMETER1 rootParameters[3] = {
-                // The first is the constant buffer object
+            D3D12_ROOT_PARAMETER1 rootParameters[4] = {
+                // The first is the constant buffer object, b0
                 {D3D12_ROOT_PARAMETER_TYPE_CBV, .Descriptor = { 0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC }, D3D12_SHADER_VISIBILITY_ALL },
 
-                // The second is the shader source view object
+                // The second is the shader source view object, t0
                 {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[0] }, D3D12_SHADER_VISIBILITY_ALL },
 
-                // The third is the unordered access view object
-                {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[1] }, D3D12_SHADER_VISIBILITY_ALL }
+                // The third is the unordered access view object, u0
+                {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[1] }, D3D12_SHADER_VISIBILITY_ALL },
+
+                // The fourth is the unordered access view object, u1
+                {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[2] }, D3D12_SHADER_VISIBILITY_ALL }
             };
 
             D3D12_VERSIONED_ROOT_SIGNATURE_DESC computeRootSignatureDesc = {
@@ -645,20 +739,32 @@ static bool InitComputeCommands(void)
     return true;
 }
 
-static int s_DataBuffer0[TEST_DATA_COUNT];
-
 // Create the source buffer object and the destination buffer object.
 // Initialize the SRV buffer object with the input buffer
 static bool CreateBuffers(void)
 {
-    // 对数据资源做初始化
+    const size_t bufferSize = TEST_DATA_COUNT * sizeof(*s_dataBuffer0);
+
+    // Allocate the source data buffers
+    s_dataBuffer0 = malloc(bufferSize);
+    s_dataBuffer1 = malloc(bufferSize);
+
+    // Initialize the source data buffers
     for (int i = 0; i < TEST_DATA_COUNT; i++)
-        s_DataBuffer0[i] = i + 1;
+        s_dataBuffer0[i] = i + 1;
+
+    int index = 0;
+    const int nGroups = TEST_DATA_COUNT / 1024;
+    for (int i = 0; i < nGroups; i++)
+    {
+        for (int j = 0; j < 1024; j++)
+            s_dataBuffer1[index++] = i + 1;
+    }
 
     // Create the compute shader's constant buffer.
-    const uint32_t bufferSize = (uint32_t)sizeof(s_DataBuffer0);
-    s_srcDataBuffer = CreateSRVBuffer(s_DataBuffer0, bufferSize);
-    s_dstDataBuffer = CreateUAV_RWBuffer(NULL, bufferSize);
+    s_srcDataBuffer = CreateSRVBuffer(s_dataBuffer0, bufferSize);
+    s_dstDataBuffer = CreateUAV_RBuffer(NULL, bufferSize);
+    CreateUAV2_RWBuffer(s_dataBuffer1, bufferSize);
 
     int cbValue = 1;
     CreateConstantBuffer(&cbValue, sizeof(cbValue));
@@ -670,16 +776,27 @@ static bool CreateBuffers(void)
 static void DoCompute(void)
 {
     ID3D12Resource *readBackBuffer = NULL;
-    D3D12_HEAP_PROPERTIES heapProperties = { D3D12_HEAP_TYPE_READBACK, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+    ID3D12Resource* readBackBuffer2 = NULL;
+
+    const D3D12_HEAP_PROPERTIES heapProperties = { D3D12_HEAP_TYPE_READBACK, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
         D3D12_MEMORY_POOL_UNKNOWN, 1, 1 };
-    D3D12_RESOURCE_DESC resourceDesc = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, sizeof(s_DataBuffer0), 1, 1, 1,
+    const D3D12_RESOURCE_DESC resourceDesc = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, TEST_DATA_COUNT * sizeof(*s_dataBuffer0), 1, 1, 1,
+        DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE };
+
+    // Source and Destination buffer resource must have the same size/width,
+    // So the resourceDesc2 MUST NOT set the width that is not equal to `TEST_DATA_COUNT * sizeof(*s_dataBuffer0)`
+    const D3D12_RESOURCE_DESC resourceDesc2 = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, TEST_DATA_COUNT * sizeof(*s_dataBuffer0), 1, 1, 1,
         DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE };
 
     // Create the read-back buffer object that will fetch the result from the UAV buffer object.
     // And make it as the copy destination.
     HRESULT hr = s_device->lpVtbl->CreateCommittedResource(s_device, &heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc,
         D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&readBackBuffer);
+    if (FAILED(hr))
+        return;
 
+    hr = s_device->lpVtbl->CreateCommittedResource(s_device, &heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc2,
+        D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&readBackBuffer2);
     if (FAILED(hr))
         return;
 
@@ -702,14 +819,19 @@ static void DoCompute(void)
     // Get the SRV GPU descriptor handle from the descriptor heap
     GetGPUDescriptorHandleForHeapStart(s_heap, &srvHandle);
 
-    D3D12_GPU_DESCRIPTOR_HANDLE uavHandle;
+    D3D12_GPU_DESCRIPTOR_HANDLE uavHandle, uavHandle2;
     // Get the UAV GPU descriptor handle from the descriptor heap
     GetGPUDescriptorHandleForHeapStart(s_heap, &uavHandle);
     uavHandle.ptr += 1 * s_srvUavDescriptorSize;
 
+    GetGPUDescriptorHandleForHeapStart(s_heap, &uavHandle2);
+    uavHandle2.ptr += 2 * s_srvUavDescriptorSize;
+
+    // Setup the input parameters
     s_computeCommandList->lpVtbl->SetComputeRootConstantBufferView(s_computeCommandList, 0, s_constantBuffer->lpVtbl->GetGPUVirtualAddress(s_constantBuffer));
     s_computeCommandList->lpVtbl->SetComputeRootDescriptorTable(s_computeCommandList, 1, srvHandle);
     s_computeCommandList->lpVtbl->SetComputeRootDescriptorTable(s_computeCommandList, 2, uavHandle);
+    s_computeCommandList->lpVtbl->SetComputeRootDescriptorTable(s_computeCommandList, 3, uavHandle2);
 
     // Dispatch the GPU threads
     s_computeCommandList->lpVtbl->Dispatch(s_computeCommandList, 4, 1, 1);
@@ -724,6 +846,15 @@ static void DoCompute(void)
     // Copy data from the UAV buffer object to the read-back buffer object.
     s_computeCommandList->lpVtbl->CopyResource(s_computeCommandList, readBackBuffer, s_dstDataBuffer);
 
+    const D3D12_RESOURCE_BARRIER barrier2 = { D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        .Transition = { s_dst2Buffer, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE } };
+    
+    s_computeCommandList->lpVtbl->ResourceBarrier(s_computeCommandList, 1, &barrier2);
+
+    s_computeCommandList->lpVtbl->CopyResource(s_computeCommandList, readBackBuffer2, s_dst2Buffer);
+
+    // Close the command list
     s_computeCommandList->lpVtbl->Close(s_computeCommandList);
 
     s_computeCommandQueue->lpVtbl->ExecuteCommandLists(s_computeCommandQueue, 1, 
@@ -732,7 +863,7 @@ static void DoCompute(void)
     SyncCommandQueue(s_computeCommandQueue, s_device, 2);
 
     void* pData;
-    const D3D12_RANGE range = { 0, TEST_DATA_COUNT };
+    D3D12_RANGE range = { 0, TEST_DATA_COUNT };
     // Map the memory buffer so that we may access the data from the host side.
     hr = readBackBuffer->lpVtbl->Map(readBackBuffer, 0, &range, &pData);
     if (FAILED(hr))
@@ -745,11 +876,22 @@ static void DoCompute(void)
     readBackBuffer->lpVtbl->Unmap(readBackBuffer, 0, NULL);
     readBackBuffer->lpVtbl->Release(readBackBuffer);
 
+    int resultBuffer2[4] = { 0 };
+    range = (D3D12_RANGE){ 0, 4 };
+    hr = readBackBuffer2->lpVtbl->Map(readBackBuffer2, 0, &range, &pData);
+    if (FAILED(hr))
+        return;
+
+    memcpy(resultBuffer2, pData, sizeof(resultBuffer2));
+
+    readBackBuffer2->lpVtbl->Unmap(readBackBuffer2, 0, NULL);
+    readBackBuffer2->lpVtbl->Release(readBackBuffer2);
+
     // Verify the result
     bool equal = true;
     for (int i = 0; i < TEST_DATA_COUNT; i++)
     {
-        if (resultBuffer[i] - 1 != s_DataBuffer0[i])
+        if (resultBuffer[i] - 1 != s_dataBuffer0[i])
         {
             printf("%d index elements are not equal!\n", i);
             equal = false;
@@ -758,6 +900,9 @@ static void DoCompute(void)
     }
     if (equal)
         puts("Verification OK!");
+
+    printf("[0] = %d, [1] = %d, [2] = %d, [3] = %d\n", 
+        resultBuffer2[0], resultBuffer2[1], resultBuffer2[2], resultBuffer2[3]);
 
     free(resultBuffer);
 }
@@ -782,6 +927,18 @@ void ReleaseResources(void)
 
     if (s_constantUploadBuffer != NULL)
         s_constantUploadBuffer->lpVtbl->Release(s_constantUploadBuffer);
+
+    if (s_dst2Buffer != NULL)
+        s_dst2Buffer->lpVtbl->Release(s_dst2Buffer);
+
+    if (s_dst2UploadBuffer != NULL)
+        s_dst2UploadBuffer->lpVtbl->Release(s_dst2UploadBuffer);
+
+    if (s_dataBuffer0 != NULL)
+        free(s_dataBuffer0);
+
+    if (s_dataBuffer1 != NULL)
+        free(s_dataBuffer1);
 
     if (s_computeAllocator != NULL)
         s_computeAllocator->lpVtbl->Release(s_computeAllocator);
@@ -843,6 +1000,17 @@ int main(void)
         {
             s_constantUploadBuffer->lpVtbl->Release(s_constantUploadBuffer);
             s_constantUploadBuffer = NULL;
+        }
+        if (s_dst2UploadBuffer != NULL)
+        {
+            s_dst2UploadBuffer->lpVtbl->Release(s_dst2UploadBuffer);
+            s_dst2UploadBuffer = NULL;
+        }
+
+        if (s_dataBuffer1 != NULL)
+        {
+            free(s_dataBuffer1);
+            s_dataBuffer1 = NULL;
         }
 
         DoCompute();
