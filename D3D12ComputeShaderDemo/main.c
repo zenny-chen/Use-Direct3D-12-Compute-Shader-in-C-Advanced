@@ -634,6 +634,8 @@ static bool InitAssets(void)
 
     // ---- Load Assets ----
 
+    ID3DBlob* errorBlob = NULL;
+
     // Create the root signatures.
     {
         D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = { 0 };
@@ -677,10 +679,10 @@ static bool InitAssets(void)
             };
 
             ID3DBlob *signature;
-            ID3DBlob *error;
-            if (D3DX12SerializeVersionedRootSignature(&computeRootSignatureDesc, featureData.HighestVersion, &signature, &error) < 0)
+            if (D3DX12SerializeVersionedRootSignature(&computeRootSignatureDesc, featureData.HighestVersion, &signature, &errorBlob) < 0)
             {
                 puts("Failed to serialize versioned root signature");
+                errorBlob->lpVtbl->Release(errorBlob);
                 return false;
             }
 
@@ -704,8 +706,13 @@ static bool InitAssets(void)
 
     // Load and compile the compute shader.
     // The comppute shader file 'compute.hlsl' is just located in the current working directory.
-    if (D3DCompileFromFile(L"compute.hlsl", NULL, NULL, "CSMain", "cs_5_0", compileFlags, 0, &computeShader, NULL) < 0)
+    if (D3DCompileFromFile(L"compute.hlsl", NULL, NULL, "CSMain", "cs_5_0", compileFlags, 0, &computeShader, &errorBlob) < 0)
+    {
+        const char *msg = errorBlob->lpVtbl->GetBufferPointer(errorBlob);
+        printf("compute.hlsl compile error: %s\n", msg);
+        errorBlob->lpVtbl->Release(errorBlob);
         return false;
+    }
 
     // Describe and create the compute pipeline state object (PSO).
     D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = { 0 };

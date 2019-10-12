@@ -18,13 +18,15 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 tid : SV_DispatchThreadID, uint3 l
     // Do the second calculation...
     const uint localIndex = localTID.x;
 
+    GroupMemoryBarrierWithGroupSync();
+
     // Firstly, put the data into the group-shared memory
     sharedBuffer[localIndex] = rwBuffer[globalIndex];
 
     GroupMemoryBarrierWithGroupSync();
 
-    // Use the first thread of each group to calculate the sum
-    if (localIndex == 0)
+    // Use the first 64 threads of each group to calculate the sum
+    if (localIndex < 64)
     {
         int sum = 0;
         for(uint i = 0; i < 1024; i++)
