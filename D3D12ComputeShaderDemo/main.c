@@ -587,33 +587,27 @@ static bool InitAssets(void)
     if (CreateDXGIFactory1(&IID_IDXGIFactory4, (void**)&factory) < 0)
         return false;
 
-    // Here, we shall use a warp device
-    IDXGIAdapter *warpAdapter;
+    // Here, we can use a warp device
+    IDXGIAdapter* warpAdapter;
     if (factory->lpVtbl->EnumWarpAdapter(factory, &IID_IDXGIAdapter, (void**)&warpAdapter) < 0)
         return false;
 
+    DXGI_ADAPTER_DESC desc;
+    warpAdapter->lpVtbl->GetDesc(warpAdapter, &desc);
+    wprintf(L"The warp device is: %s\n", desc.Description);
+
+    // Here, we can choose which device to use
+    IDXGIAdapter1* adapter1;
+    if (factory->lpVtbl->EnumAdapters1(factory, 0, &adapter1) < 0)
+        return false;
+
+    DXGI_ADAPTER_DESC1 desc1;
+    adapter1->lpVtbl->GetDesc1(adapter1, &desc1);
+    wprintf(L"Current used GPU is: %s\n", desc1.Description);
+
     // Create the D3D12 device
-    if (D3D12CreateDevice((IUnknown*)warpAdapter, D3D_FEATURE_LEVEL_12_0, &IID_ID3D12Device, (void**)&s_device) < 0)
+    if (D3D12CreateDevice((IUnknown*)adapter1, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void**)&s_device) < 0)
         return false;
-
-    // Check 4X MSAA quality support for our back buffer format.
-    // All Direct3D 11 capable devices support 4X MSAA for all render 
-    // target formats, so we only need to check quality support.
-    // This step is optional.
-    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS msQualityLevels;
-    msQualityLevels.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    msQualityLevels.SampleCount = 4;
-    msQualityLevels.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
-    msQualityLevels.NumQualityLevels = 0;
-    HRESULT hr = s_device->lpVtbl->CheckFeatureSupport(s_device,
-        D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
-        &msQualityLevels,
-        sizeof(msQualityLevels));
-    if (hr < 0)
-        return false;
-
-    unsigned msaaQuality = msQualityLevels.NumQualityLevels;
-    printf("msaaQuality: %u\n", msaaQuality);
 
     // ---- Create descriptor heaps. ----
     D3D12_DESCRIPTOR_HEAP_DESC srvUavHeapDesc = { 0 };
@@ -621,7 +615,7 @@ static bool InitAssets(void)
     srvUavHeapDesc.NumDescriptors = 3;
     srvUavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvUavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    hr = s_device->lpVtbl->CreateDescriptorHeap(s_device, &srvUavHeapDesc, &IID_ID3D12DescriptorHeap, (void**)&s_heap);
+    HRESULT hr = s_device->lpVtbl->CreateDescriptorHeap(s_device, &srvUavHeapDesc, &IID_ID3D12DescriptorHeap, (void**)&s_heap);
     if (FAILED(hr))
     {
         puts("Failed to create s_srvHeap!");
@@ -638,63 +632,63 @@ static bool InitAssets(void)
 
     // Create the root signatures.
     {
-        D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = { 0 };
+    D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = { 0 };
 
-        // This is the highest version the sample supports. If CheckFeatureSupport succeeds, the HighestVersion returned will not be greater than this.
-        featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        if(s_device->lpVtbl->CheckFeatureSupport(s_device, D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData)) < 0)
-            featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+    // This is the highest version the sample supports. If CheckFeatureSupport succeeds, the HighestVersion returned will not be greater than this.
+    featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    if (s_device->lpVtbl->CheckFeatureSupport(s_device, D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData)) < 0)
+        featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
 
-        // Compute root signature.
+    // Compute root signature.
+    {
+        D3D12_DESCRIPTOR_RANGE1 ranges[3] = {
+            // t0
+            {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
+
+            // u0
+            {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
+
+            // u1
+            {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND}
+        };
+
+        // There're 3 parameters which will be passed to the compute shader
+        D3D12_ROOT_PARAMETER1 rootParameters[4] = {
+            // The first is the constant buffer object, b0
+            {D3D12_ROOT_PARAMETER_TYPE_CBV, .Descriptor = { 0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC }, D3D12_SHADER_VISIBILITY_ALL },
+
+            // The second is the shader source view object, t0
+            {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[0] }, D3D12_SHADER_VISIBILITY_ALL },
+
+            // The third is the unordered access view object, u0
+            {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[1] }, D3D12_SHADER_VISIBILITY_ALL },
+
+            // The fourth is the unordered access view object, u1
+            {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[2] }, D3D12_SHADER_VISIBILITY_ALL }
+        };
+
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC computeRootSignatureDesc = {
+            D3D_ROOT_SIGNATURE_VERSION_1_1,
+            .Desc_1_1 = { _countof(rootParameters), rootParameters, 0, NULL, D3D12_ROOT_SIGNATURE_FLAG_NONE }
+        };
+
+        ID3DBlob* signature;
+        if (D3DX12SerializeVersionedRootSignature(&computeRootSignatureDesc, featureData.HighestVersion, &signature, &errorBlob) < 0)
         {
-            D3D12_DESCRIPTOR_RANGE1 ranges[3] = {
-                // t0
-                {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
-
-                // u0
-                {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
-
-                // u1
-                {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND}
-            };
-
-            // There're 3 parameters which will be passed to the compute shader
-            D3D12_ROOT_PARAMETER1 rootParameters[4] = {
-                // The first is the constant buffer object, b0
-                {D3D12_ROOT_PARAMETER_TYPE_CBV, .Descriptor = { 0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC }, D3D12_SHADER_VISIBILITY_ALL },
-
-                // The second is the shader source view object, t0
-                {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[0] }, D3D12_SHADER_VISIBILITY_ALL },
-
-                // The third is the unordered access view object, u0
-                {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[1] }, D3D12_SHADER_VISIBILITY_ALL },
-
-                // The fourth is the unordered access view object, u1
-                {D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, .DescriptorTable = { 1, &ranges[2] }, D3D12_SHADER_VISIBILITY_ALL }
-            };
-
-            D3D12_VERSIONED_ROOT_SIGNATURE_DESC computeRootSignatureDesc = {
-                D3D_ROOT_SIGNATURE_VERSION_1_1, 
-                .Desc_1_1 = { _countof(rootParameters), rootParameters, 0, NULL, D3D12_ROOT_SIGNATURE_FLAG_NONE }
-            };
-
-            ID3DBlob *signature;
-            if (D3DX12SerializeVersionedRootSignature(&computeRootSignatureDesc, featureData.HighestVersion, &signature, &errorBlob) < 0)
-            {
-                puts("Failed to serialize versioned root signature");
-                errorBlob->lpVtbl->Release(errorBlob);
-                return false;
-            }
-
-            if (s_device->lpVtbl->CreateRootSignature(s_device, 0, signature->lpVtbl->GetBufferPointer(signature),
-                signature->lpVtbl->GetBufferSize(signature), &IID_ID3D12RootSignature, &s_computeRootSignature) < 0)
-            {
-                puts("Failed to create root signature!");
-                return false;
-            }
-
-            s_computeRootSignature->lpVtbl->SetName(s_computeRootSignature, L"s_computeRootSignature");
+            puts("Failed to serialize versioned root signature");
+            errorBlob->lpVtbl->Release(errorBlob);
+            return false;
         }
+
+        if (s_device->lpVtbl->CreateRootSignature(s_device, 0, signature->lpVtbl->GetBufferPointer(signature),
+            signature->lpVtbl->GetBufferSize(signature), &IID_ID3D12RootSignature, &s_computeRootSignature) < 0)
+        {
+            puts("Failed to create root signature!");
+            return false;
+        }
+
+        s_computeRootSignature->lpVtbl->SetName(s_computeRootSignature, L"s_computeRootSignature");
+    }
     }
 
     // Create the pipeline states, which includes compiling and loading shaders.
@@ -708,7 +702,7 @@ static bool InitAssets(void)
     // The comppute shader file 'compute.hlsl' is just located in the current working directory.
     if (D3DCompileFromFile(L"compute.hlsl", NULL, NULL, "CSMain", "cs_5_0", compileFlags, 0, &computeShader, &errorBlob) < 0)
     {
-        const char *msg = errorBlob->lpVtbl->GetBufferPointer(errorBlob);
+        const char* msg = errorBlob->lpVtbl->GetBufferPointer(errorBlob);
         printf("compute.hlsl compile error: %s\n", msg);
         errorBlob->lpVtbl->Release(errorBlob);
         return false;
@@ -724,6 +718,30 @@ static bool InitAssets(void)
         (void**)&s_computeState);
     if (FAILED(hr))
         return false;
+
+    // Check the supported highest shader model
+    struct { int shaderModel; const char* desc; } shaderModels[] = {
+        { D3D_SHADER_MODEL_6_5, "Shader Model 6.5" },
+        { D3D_SHADER_MODEL_6_4, "Shader Model 6.4" },
+        { D3D_SHADER_MODEL_6_3, "Shader Model 6.3" },
+        { D3D_SHADER_MODEL_6_2, "Shader Model 6.2" },
+        { D3D_SHADER_MODEL_6_1, "Shader Model 6.1" },
+        { D3D_SHADER_MODEL_6_0, "Shader Model 6.0" },
+        { D3D_SHADER_MODEL_5_1, "Shader Model 5.1" },
+    };
+    size_t index;
+    for (index = 0; index < _countof(shaderModels); index++)
+    {
+        D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { shaderModels[index].shaderModel };
+        hr = s_device->lpVtbl->CheckFeatureSupport(s_device, D3D12_FEATURE_SHADER_MODEL,
+            &shaderModel, sizeof(shaderModel));
+        if (!FAILED(hr))
+            break;
+    }
+    const char* highestShaderModelDesc = index == _countof(shaderModels) ?
+        "Shader Model 5.0" : shaderModels[index].desc;
+
+    printf("The current GPU supports: %s\n", highestShaderModelDesc);
 
     return true;
 }
@@ -773,8 +791,25 @@ static bool CreateBuffers(void)
     s_dstDataBuffer = CreateUAV_RBuffer(NULL, bufferSize);
     CreateUAV2_RWBuffer(s_dataBuffer1, bufferSize);
 
-    int cbValue = 1;
-    CreateConstantBuffer(&cbValue, sizeof(cbValue));
+    D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = { 0 };
+    HRESULT hr = s_device->lpVtbl->CheckFeatureSupport(s_device, D3D12_FEATURE_D3D12_OPTIONS1,
+                                                        &options1, sizeof(options1));
+    if (FAILED(hr))
+        return false;
+
+    struct { int cbValue; UINT minWaveLanes; } cbuffer = {
+        1, 64
+    };
+
+    if (options1.WaveOps)
+    {
+        puts("Current GPU supports HLSL 6.0 wave operations!!");
+        printf("The minimum wave lane count is: %u\n", options1.WaveLaneCountMin);
+
+        cbuffer.minWaveLanes = options1.WaveLaneCountMin;
+    }
+
+    CreateConstantBuffer(&cbuffer, sizeof(cbuffer));
 
     return true;
 }
@@ -792,7 +827,7 @@ static void DoCompute(void)
 
     // Source and Destination buffer resource must have the same size/width,
     // So the resourceDesc2 MUST NOT set the width that is not equal to `TEST_DATA_COUNT * sizeof(*s_dataBuffer0)`
-    const D3D12_RESOURCE_DESC resourceDesc2 = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, TEST_DATA_COUNT * sizeof(*s_dataBuffer0), 1, 1, 1,
+    const D3D12_RESOURCE_DESC resourceDesc2 = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, TEST_DATA_COUNT * sizeof(*s_dataBuffer1), 1, 1, 1,
         DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE };
 
     // Create the read-back buffer object that will fetch the result from the UAV buffer object.
@@ -883,13 +918,13 @@ static void DoCompute(void)
     readBackBuffer->lpVtbl->Unmap(readBackBuffer, 0, NULL);
     readBackBuffer->lpVtbl->Release(readBackBuffer);
 
-    int resultBuffer2[4] = { 0 };
-    range = (D3D12_RANGE){ 0, 4 };
+    int* resultBuffer2 = malloc(TEST_DATA_COUNT * sizeof(*resultBuffer2));
+    range = (D3D12_RANGE){ 0, TEST_DATA_COUNT };
     hr = readBackBuffer2->lpVtbl->Map(readBackBuffer2, 0, &range, &pData);
     if (FAILED(hr))
         return;
 
-    memcpy(resultBuffer2, pData, sizeof(resultBuffer2));
+    memcpy(resultBuffer2, pData, TEST_DATA_COUNT * sizeof(*resultBuffer2));
 
     readBackBuffer2->lpVtbl->Unmap(readBackBuffer2, 0, NULL);
     readBackBuffer2->lpVtbl->Release(readBackBuffer2);
@@ -906,12 +941,26 @@ static void DoCompute(void)
         }
     }
     if (equal)
-        puts("Verification OK!");
+        puts("Verification 1 OK!");
 
     printf("[0] = %d, [1] = %d, [2] = %d, [3] = %d\n", 
         resultBuffer2[0], resultBuffer2[1], resultBuffer2[2], resultBuffer2[3]);
 
+    equal = true;
+    for (int i = 4; i < TEST_DATA_COUNT; i++)
+    {
+        if (resultBuffer2[i] != s_dataBuffer1[i])
+        {
+            printf("%d index elements are not equal!\n", i);
+            equal = false;
+            break;
+        }
+    }
+    if (equal)
+        puts("Verification 2 OK!");
+
     free(resultBuffer);
+    free(resultBuffer2);
 }
 
 // Release all the resources
@@ -1012,12 +1061,6 @@ int main(void)
         {
             s_dst2UploadBuffer->lpVtbl->Release(s_dst2UploadBuffer);
             s_dst2UploadBuffer = NULL;
-        }
-
-        if (s_dataBuffer1 != NULL)
-        {
-            free(s_dataBuffer1);
-            s_dataBuffer1 = NULL;
         }
 
         DoCompute();

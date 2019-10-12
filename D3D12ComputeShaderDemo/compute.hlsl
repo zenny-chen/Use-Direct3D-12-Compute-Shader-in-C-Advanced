@@ -1,6 +1,7 @@
 cbuffer cbCS : register(b0)
 {
     int g_constant;
+    uint g_minWaveLanes;
 };
 
 groupshared int sharedBuffer[1024];
@@ -16,15 +17,14 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 tid : SV_DispatchThreadID, uint3 l
     dstBuffer[globalIndex] = srcBuffer[globalIndex] + g_constant;
 
     // Do the second calculation...
-    const uint localIndex = localTID.x;
 
     // Firstly, put the data into the group-shared memory
-    sharedBuffer[localIndex] = rwBuffer[globalIndex];
+    sharedBuffer[groupIndex] = rwBuffer[globalIndex];
 
     GroupMemoryBarrierWithGroupSync();
 
-    // Use the first 64 threads of each group to calculate the sum
-    if (localIndex < 64)
+    // Use the first g_minWaveLanes threads of each group to calculate the sum
+    if (groupIndex < g_minWaveLanes)
     {
         int sum = 0;
         for(uint i = 0; i < 1024; i++)
@@ -32,5 +32,6 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 tid : SV_DispatchThreadID, uint3 l
 
         rwBuffer[groupID.x] = sum;
     }
+
 }
 
