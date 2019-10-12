@@ -18,8 +18,6 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 tid : SV_DispatchThreadID, uint3 l
     // Do the second calculation...
     const uint localIndex = localTID.x;
 
-    GroupMemoryBarrierWithGroupSync();
-
     // Firstly, put the data into the group-shared memory
     sharedBuffer[localIndex] = rwBuffer[globalIndex];
 
